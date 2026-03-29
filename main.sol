@@ -77,3 +77,82 @@ event ClawEmergencyWithdraw(address indexed token, uint256 amount, address index
 event ClawNonceAdvanced(address indexed player, uint256 newNonce);
 event ClawTierMatrixUpdated(uint8 tier, uint256 weightBps);
 event ClawRollingCapSet(uint256 oldCap, uint256 newCap);
+event ClawFloorRaised(uint256 oldFloor, uint256 newFloor);
+event ClawMutexState(bool engaged);
+event ClawOraclePing(address indexed oracle, uint256 timestamp);
+
+interface IERC20Mark {
+    function transfer(address to, uint256 v) external returns (bool);
+    function transferFrom(address from, address to, uint256 v) external returns (bool);
+    function balanceOf(address a) external view returns (uint256);
+}
+
+interface IERC721ReceiverMark {
+    function onERC721Received(address op, address from, uint256 id, bytes calldata data) external returns (bytes4);
+}
+
+enum ClawSessionState { Dormant, Open, Cooldown, Sealed }
+
+struct ClawSessionMeta {
+    uint64 openTs;
+    uint64 closeTs;
+    uint64 sealedTs;
+    ClawSessionState state;
+    bytes32 driftVector;
+}
+
+struct ClawPlayerLedger {
+    uint256 creditsWei;
+    uint256 grabNonce;
+    uint256 pendingPrizeWei;
+    uint64 lastGrabTs;
+    uint32 rollingWithdrawn;
+}
+
+struct ClawFeeRails {
+    uint16 syndicateBps;
+    uint16 riftBps;
+    uint16 pitBps;
+    uint16 vectorBps;
+}
+
+library MarkClawEntropy {
+    function mix(bytes32 a, bytes32 b) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(a, b));
+    }
+
+    function deriveTier(uint256 roll, uint256[5] memory w) internal pure returns (uint8) {
+        uint256 t = roll % 10_000;
+        uint256 c = 0;
+        for (uint256 i = 0; i < 5; ) {
+            c += w[i];
+            if (t < c) return uint8(i);
+            unchecked { ++i; }
+        }
+        return 0;
+    }
+}
+
+library MarkClawBits {
+    function packBps(ClawFeeRails memory f) internal pure returns (uint256) {
+        return uint256(f.syndicateBps) | (uint256(f.riftBps) << 16) | (uint256(f.pitBps) << 32)
+            | (uint256(f.vectorBps) << 48);
+    }
+
+    function unpackBps(uint256 p) internal pure returns (ClawFeeRails memory f) {
+        f.syndicateBps = uint16(p);
+        f.riftBps = uint16(p >> 16);
+        f.pitBps = uint16(p >> 32);
+        f.vectorBps = uint16(p >> 48);
+    }
+}
+
+/// @title MarkClaw
+/// @notice Arcade claw credits, synthetic grab outcomes, and pull-based prize ETH.
+/// @dev Outcome entropy mixes prevrandao with caller salt and nonces — assume carnival economics, not secure randomness.
+contract MarkClaw is IERC721ReceiverMark {
+    using MarkClawEntropy for bytes32;
+
+    uint256 private constant BPS_DENOM = 10_000;
+    uint256 public constant GRAB_COST_WEI = 0.00042 ether;
+    uint256 private constant MAX_CREDIT_PILE = 500 ether;
